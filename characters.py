@@ -1,7 +1,6 @@
 # apprendre les lettres pour une enfant en maternel
 import json
 import random
-import string
 import pyttsx3
 import os
 
@@ -20,16 +19,27 @@ class Pyttsx3Voice:
         self.engine.runAndWait()
 
 
+def check_file_exist():
+    if os.path.exists("profil.json"):
+        with open("profil.json", 'r') as f:
+            datas = json.load(f)
+    else:
+        datas = {'nom': '', 'score': 0, 'alphabet': []}
+    return datas
+
+
+def update_file(data_updated):
+    with open("profil.json", 'w') as f:
+        json.dump(data_updated, f, indent=4)
+
+
 engine = Pyttsx3Voice()
 
-if os.path.exists("profil.json"):
-    with open("profil.json", 'r') as f:
-        datas = json.load(f)
-else:
-    datas = {'nom': '', 'score': 0, 'alphabet': []}
+datas = check_file_exist()
 
 points = 0
-lettres = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
+lettres = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+           'w', 'x', 'y', 'z']
 choise = "1"
 
 if datas['nom'] != '':
@@ -63,10 +73,14 @@ while choise != "2":
 print("Merci d'avoir joué !")
 print("Tu as au total", points, "points")
 
-with open("profil.json", 'w') as f:
-    datas['nom'] = nom
-    datas['score'] = points
-    json.dump(datas, f)
+if len(chars) == 26:
+    print("Tu as réussi à reconnaître les 26 lettres de l'alphabet !")
+    print("Tu peux passer au niveau suivant !")
+
+datas['nom'] = nom
+datas['score'] = points
+datas['alphabet'] = chars
+update_file(datas)
 
 if __name__ == '__main__':
     pass
