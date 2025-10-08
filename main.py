@@ -355,11 +355,11 @@ class UserSelectionScreen(QWidget):
         btn_layout = QHBoxLayout()
 
         self.select_btn = ColorfulButton("✓ Sélectionner", "#4ECDC4")
-        self.select_btn.setMaximumWidth(250)
+        self.select_btn.setMaximumWidth(400)
         self.select_btn.clicked.connect(self.select_user)
 
         self.new_user_btn = ColorfulButton("+ Nouvel enfant", "#45B7D1")
-        self.new_user_btn.setMaximumWidth(250)
+        self.new_user_btn.setMaximumWidth(420)
         self.new_user_btn.clicked.connect(self.show_new_user_form)
 
         btn_layout.addWidget(self.select_btn)
@@ -391,11 +391,11 @@ class UserSelectionScreen(QWidget):
         new_user_btn_layout = QHBoxLayout()
 
         create_btn = ColorfulButton("✓ Créer", "#2ECC71")
-        create_btn.setMaximumWidth(180)
+        create_btn.setMaximumWidth(250)
         create_btn.clicked.connect(self.create_new_user)
 
         cancel_btn = ColorfulButton("✕ Annuler", "#E74C3C")
-        cancel_btn.setMaximumWidth(180)
+        cancel_btn.setMaximumWidth(300)
         cancel_btn.clicked.connect(self.hide_new_user_form)
 
         new_user_btn_layout.addWidget(create_btn)
@@ -1450,7 +1450,7 @@ class StatsScreen(QWidget):
         scroll.setWidget(self.details_widget)
 
         back_btn = ColorfulButton("🏠 Retour au menu", "#45B7D1")
-        back_btn.setMaximumWidth(300)
+        back_btn.setMaximumWidth(500)
         back_btn.clicked.connect(self.back_to_menu.emit)
 
         layout.addWidget(self.title)
