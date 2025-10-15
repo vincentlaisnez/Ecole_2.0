@@ -2,109 +2,282 @@ import sys
 import random
 import json
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 from datetime import datetime
-import pyttsx3
 from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QLineEdit,
                                QStackedWidget, QGridLayout, QProgressBar, QMessageBox,
                                QListWidget, QListWidgetItem, QScrollArea, QGraphicsOpacityEffect)
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QRect, Signal, QObject, QThread, QEasingCurve, \
-    QSequentialAnimationGroup, QParallelAnimationGroup
-from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QRect, Signal, QThread, QEasingCurve, \
+    QSequentialAnimationGroup, QUrl
+from PySide6.QtGui import QFont, QPalette, QColor
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 
-class VoiceThread(QThread):
-    """Thread pour la synthèse vocale asynchrone"""
-    finished = Signal()
+class AudioManager:
+    """Gestionnaire centralisé des fichiers audio pré-générés"""
 
-    def __init__(self, engine, text):
-        super().__init__()
-        self.engine = engine
-        self.text = text
+    def __init__(self, audio_dir="audio_cache"):
+        self.audio_dir = Path(audio_dir)
+        self.audio_dir.mkdir(exist_ok=True)
+        self.player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(1.0)
+        self.is_playing = False
 
-    def run(self):
+        # Vérifier si pico2wave est disponible
+        self.pico_available = self._check_pico()
+
+    def _check_pico(self):
+        """Vérifie si pico2wave est installé"""
         try:
-            self.engine.say(self.text)
-            self.engine.runAndWait()
+            subprocess.run(['pico2wave', '--help'],
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE,
+                           check=False)
+            print("✓ Pico TTS détecté")
+            return True
+        except FileNotFoundError:
+            print("✗ Pico TTS non détecté, utilisation d'espeak")
+            return False
+
+    def generate_all_audio(self, progress_callback=None):
+        """Génère tous les fichiers audio nécessaires"""
+        items_to_generate = []
+
+        # Lettres A-Z
+        for letter in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+            items_to_generate.append((letter, letter))
+
+        # Chiffres 0-9
+        for num in range(10):
+            items_to_generate.append((str(num), str(num)))
+
+        # Messages de félicitations
+        messages = {
+            'bravo': "Bravo",
+            'super': "Super",
+            'excellent': "Excellent",
+            'genial': "Génial",
+            'tres_bien': "Très bien"
+        }
+        for key, text in messages.items():
+            items_to_generate.append((key, text))
+
+        total = len(items_to_generate)
+
+        for idx, (filename, text) in enumerate(items_to_generate):
+            self._generate_audio_file(filename, text)
+            if progress_callback:
+                progress_callback(idx + 1, total, text)
+
+        print(f"✓ {total} fichiers audio générés avec succès")
+
+    def _generate_audio_file(self, filename, text):
+        """Génère un fichier audio individuel"""
+        audio_file = self.audio_dir / f"{filename}.wav"
+
+        # Ne pas regénérer si le fichier existe déjà
+        if audio_file.exists():
+            return
+
+        try:
+            if self.pico_available:
+                # Utiliser Pico TTS avec voix française de haute qualité
+                subprocess.run([
+                    'pico2wave',
+                    '-l', 'fr-FR',
+                    '-w', str(audio_file),
+                    text
+                ], check=True, capture_output=True, timeout=5)
+            else:
+                # Fallback sur espeak avec meilleurs paramètres
+                subprocess.run([
+                    'espeak',
+                    '-v', 'fr',
+                    '-s', '140',  # Vitesse modérée
+                    '-p', '50',  # Pitch
+                    '-a', '200',  # Amplitude
+                    '-w', str(audio_file),
+                    text
+                ], check=True, capture_output=True, timeout=5)
+
+        except subprocess.TimeoutExpired:
+            print(f"⚠ Timeout lors de la génération de {filename}")
+        except Exception as e:
+            print(f"⚠ Erreur lors de la génération de {filename}: {e}")
+
+    def play(self, text):
+        """Joue un fichier audio pré-généré"""
+        if self.is_playing:
+            self.stop()
+
+        # Déterminer le fichier à jouer
+        audio_file = self.audio_dir / f"{text}.wav"
+
+        if not audio_file.exists():
+            print(f"⚠ Fichier audio manquant: {text}")
+            # Essayer de le générer à la volée
+            self._generate_audio_file(text, text)
+            if not audio_file.exists():
+                return
+
+        try:
+            self.is_playing = True
+            self.player.setSource(QUrl.fromLocalFile(str(audio_file.absolute())))
+            self.player.play()
+
+            # Auto-reset du flag après la fin de lecture
+            def on_playback_state_changed(state):
+                if state == QMediaPlayer.PlaybackState.StoppedState:
+                    self.is_playing = False
+
+            self.player.playbackStateChanged.connect(on_playback_state_changed)
+
+        except Exception as e:
+            print(f"⚠ Erreur lors de la lecture de {text}: {e}")
+            self.is_playing = False
+
+    def stop(self):
+        """Arrête la lecture en cours"""
+        try:
+            self.player.stop()
         except:
             pass
-        finally:
-            self.finished.emit()
+        self.is_playing = False
+
+    def cleanup_cache(self):
+        """Nettoie le cache audio (optionnel)"""
+        for audio_file in self.audio_dir.glob("*.wav"):
+            try:
+                audio_file.unlink()
+            except:
+                pass
+
+
+class InitializationScreen(QWidget):
+    """Écran d'initialisation avec génération des fichiers audio"""
+    initialization_complete = Signal()
+
+    def __init__(self, audio_manager):
+        super().__init__()
+        self.audio_manager = audio_manager
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor(230, 245, 255))
+        self.setPalette(palette)
+
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+
+        title = QLabel("🎓 Apprends l'Alphabet !")
+        title.setFont(QFont('Arial', 48, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("color: #FF6B6B; margin: 30px;")
+
+        self.status_label = QLabel("Préparation des sons...")
+        self.status_label.setFont(QFont('Arial', 18))
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("color: #4ECDC4; margin: 20px;")
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setMinimumWidth(400)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 3px solid #4ECDC4;
+                border-radius: 15px;
+                text-align: center;
+                height: 40px;
+                background-color: white;
+                color: #2C3E50;
+                font-weight: bold;
+                font-size: 16px;
+            }
+            QProgressBar::chunk {
+                background-color: #4ECDC4;
+                border-radius: 12px;
+            }
+        """)
+
+        layout.addWidget(title)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_bar, alignment=Qt.AlignCenter)
+
+        self.setLayout(layout)
+
+    def start_initialization(self):
+        """Lance l'initialisation des fichiers audio"""
+        QTimer.singleShot(500, self._generate_audio)
+
+    def _generate_audio(self):
+        """Génère les fichiers audio avec mise à jour de la progression"""
+
+        def progress_callback(current, total, text):
+            percentage = int((current / total) * 100)
+            self.progress_bar.setValue(percentage)
+            self.status_label.setText(f"Génération: {text} ({current}/{total})")
+            QApplication.processEvents()  # Force la mise à jour de l'interface
+
+        try:
+            self.audio_manager.generate_all_audio(progress_callback)
+            self.status_label.setText("✓ Prêt à jouer !")
+            QTimer.singleShot(500, self.initialization_complete.emit)
+        except Exception as e:
+            self.status_label.setText(f"⚠ Erreur: {e}")
+            print(f"Erreur d'initialisation: {e}")
 
 
 class VoiceEngine:
-    """Gestionnaire de synthèse vocale locale avec parallélisme"""
+    """Gestionnaire de synthèse vocale utilisant AudioManager"""
 
-    def __init__(self):
-        self.engine = pyttsx3.init()
-        self.engine.setProperty('rate', 150)
-        self.is_speaking = False
-        self.current_thread = None
-        self.executor = ThreadPoolExecutor(max_workers=2)
-
-        # Recherche d'une voix française féminine
-        voices = self.engine.getProperty('voices')
-        female_voice_found = False
-
-        # Priorité 1: Voix française féminine
-        for voice in voices:
-            if ('french' in voice.name.lower() or 'fr' in voice.id.lower()) and \
-                    ('female' in voice.name.lower() or 'femme' in voice.name.lower() or 'f' in voice.id.lower()):
-                self.engine.setProperty('voice', voice.id)
-                female_voice_found = True
-                break
-
-        # Priorité 2: N'importe quelle voix française
-        if not female_voice_found:
-            for voice in voices:
-                if 'french' in voice.name.lower() or 'fr' in voice.id.lower():
-                    self.engine.setProperty('voice', voice.id)
-                    female_voice_found = True
-                    break
-
-        # Priorité 3: Voix féminine (n'importe quelle langue)
-        if not female_voice_found:
-            for voice in voices:
-                if 'female' in voice.name.lower() or 'femme' in voice.name.lower():
-                    self.engine.setProperty('voice', voice.id)
-                    break
+    def __init__(self, audio_manager):
+        self.audio_manager = audio_manager
 
     def speak_async(self, text):
         """Prononce le texte de manière asynchrone"""
-        if not self.is_speaking:
-            self.is_speaking = True
+        # Normaliser le texte
+        text_normalized = text.lower().strip()
 
-            def speak_task():
-                try:
-                    self.engine.say(text)
-                    self.engine.runAndWait()
-                finally:
-                    self.is_speaking = False
+        # Mapper les messages aux fichiers audio
+        message_map = {
+            'bravo !': 'bravo',
+            'bravo!': 'bravo',
+            'super !': 'super',
+            'super!': 'super',
+            'excellent !': 'excellent',
+            'excellent!': 'excellent',
+            'génial !': 'genial',
+            'génial!': 'genial',
+            'très bien !': 'tres_bien',
+            'très bien!': 'tres_bien'
+        }
 
-            self.executor.submit(speak_task)
+        audio_key = message_map.get(text_normalized, text.upper())
+        self.audio_manager.play(audio_key)
 
     def speak(self, text):
-        """Prononce le texte de manière synchrone (compatible avec l'ancien code)"""
+        """Alias pour compatibilité"""
         self.speak_async(text)
 
     def stop(self):
         """Arrête la synthèse vocale en cours"""
-        if self.is_speaking:
-            try:
-                self.engine.stop()
-            except:
-                pass
-            self.is_speaking = False
+        self.audio_manager.stop()
 
     def shutdown(self):
-        """Ferme proprement l'executor"""
-        self.executor.shutdown(wait=False)
+        """Ferme proprement le moteur"""
+        self.audio_manager.stop()
 
 
 class DataManager:
-    """Gestionnaire de données pour les profils et statistiques avec parallélisme"""
+    """Gestionnaire de données pour les profils et statistiques"""
 
     def __init__(self):
         self.data_file = Path('alphabet_data.json')
@@ -117,10 +290,9 @@ class DataManager:
         self.observers.append(callback)
 
     def notify_observers(self):
-        """Notifie tous les observateurs d'une mise à jour (dans le thread principal)"""
+        """Notifie tous les observateurs d'une mise à jour"""
         for callback in self.observers:
             try:
-                # Exécuter dans le thread principal pour éviter les erreurs Qt
                 QTimer.singleShot(0, callback)
             except:
                 pass
@@ -143,7 +315,7 @@ class DataManager:
         self.executor.submit(save_task)
 
     def save_data_sync(self):
-        """Sauvegarde synchrone des données (pour fermeture/changement d'écran)"""
+        """Sauvegarde synchrone des données"""
         with open(self.data_file, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, indent=2, ensure_ascii=False)
 
@@ -201,10 +373,8 @@ class DataManager:
                 success_rate = stats['correct'] / stats['attempts']
                 letter_scores.append((letter, success_rate, stats['attempts']))
 
-        # Trie par taux de réussite (croissant) et nombre de tentatives
         letter_scores.sort(key=lambda x: (x[1], -x[2]))
 
-        # Retourne les lettres difficiles ou aléatoires si pas assez de données
         difficult = [l[0] for l in letter_scores[:count]]
         if len(difficult) < count:
             all_letters = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
@@ -217,7 +387,6 @@ class DataManager:
         """Retourne les chiffres les plus difficiles pour l'utilisateur"""
         user = self.data['users'][name]
 
-        # Vérifier si l'utilisateur a des stats pour les chiffres
         if 'stats_numbers' not in user:
             user['stats_numbers'] = {str(num): {'correct': 0, 'attempts': 0} for num in range(10)}
             user['total_correct_numbers'] = 0
@@ -230,10 +399,8 @@ class DataManager:
                 success_rate = stats['correct'] / stats['attempts']
                 number_scores.append((number, success_rate, stats['attempts']))
 
-        # Trie par taux de réussite (croissant) et nombre de tentatives
         number_scores.sort(key=lambda x: (x[1], -x[2]))
 
-        # Retourne les chiffres difficiles ou aléatoires si pas assez de données
         difficult = [n[0] for n in number_scores[:count]]
         if len(difficult) < count:
             all_numbers = [str(i) for i in range(10)]
@@ -248,10 +415,9 @@ class ColorfulButton(QPushButton):
 
     def __init__(self, text, color, parent=None):
         super().__init__(text, parent)
-        # Taille fixe plus grande pour les boutons de réponse
         self.setMinimumSize(200, 120)
         self.setMaximumSize(400, 150)
-        self.setFont(QFont('Arial', 36, QFont.Bold))  # Police réduite à 36px
+        self.setFont(QFont('Arial', 36, QFont.Bold))
         self.base_color = color
         self.setStyleSheet(f"""
             QPushButton {{
@@ -279,7 +445,10 @@ class ColorfulButton(QPushButton):
             '#FFA07A': '#FFB89A',
             '#98D8C8': '#B8E8D8',
             '#F7DC6F': '#F7E68F',
-            '#E67E22': '#F39C12'
+            '#E67E22': '#F39C12',
+            '#2ECC71': '#52D98C',
+            '#E74C3C': '#F16A5E',
+            '#95A5A6': '#AAB7B8'
         }
         return colors.get(color, color)
 
@@ -292,7 +461,10 @@ class ColorfulButton(QPushButton):
             '#FFA07A': '#FF805A',
             '#98D8C8': '#78B8A8',
             '#F7DC6F': '#D7BC4F',
-            '#E67E22': '#D35400'
+            '#E67E22': '#D35400',
+            '#2ECC71': '#27AE60',
+            '#E74C3C': '#C0392B',
+            '#95A5A6': '#7F8C8D'
         }
         return colors.get(color, color)
 
@@ -308,7 +480,6 @@ class UserSelectionScreen(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        # Fond opaque
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor(255, 250, 205))
@@ -317,13 +488,11 @@ class UserSelectionScreen(QWidget):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
 
-        # Titre
         title = QLabel("🎈 Qui va jouer aujourd'hui ? 🎈")
         title.setFont(QFont('Arial', 42, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #FF6B6B; margin: 20px; background-color: transparent;")
 
-        # Liste des utilisateurs
         self.user_list = QListWidget()
         self.user_list.setFont(QFont('Arial', 20))
         self.user_list.setMaximumWidth(500)
@@ -351,21 +520,19 @@ class UserSelectionScreen(QWidget):
         """)
         self.user_list.itemDoubleClicked.connect(self.select_user)
 
-        # Boutons
         btn_layout = QHBoxLayout()
 
         self.select_btn = ColorfulButton("✓ Sélectionner", "#4ECDC4")
-        self.select_btn.setMaximumWidth(400)
+        self.select_btn.setMaximumWidth(390)
         self.select_btn.clicked.connect(self.select_user)
 
         self.new_user_btn = ColorfulButton("+ Nouvel enfant", "#45B7D1")
-        self.new_user_btn.setMaximumWidth(420)
+        self.new_user_btn.setMaximumWidth(430)
         self.new_user_btn.clicked.connect(self.show_new_user_form)
 
         btn_layout.addWidget(self.select_btn)
         btn_layout.addWidget(self.new_user_btn)
 
-        # Formulaire nouveau utilisateur (caché par défaut)
         self.new_user_widget = QWidget()
         new_user_layout = QVBoxLayout()
 
@@ -391,11 +558,11 @@ class UserSelectionScreen(QWidget):
         new_user_btn_layout = QHBoxLayout()
 
         create_btn = ColorfulButton("✓ Créer", "#2ECC71")
-        create_btn.setMaximumWidth(250)
+        create_btn.setMaximumWidth(180)
         create_btn.clicked.connect(self.create_new_user)
 
         cancel_btn = ColorfulButton("✕ Annuler", "#E74C3C")
-        cancel_btn.setMaximumWidth(300)
+        cancel_btn.setMaximumWidth(180)
         cancel_btn.clicked.connect(self.hide_new_user_form)
 
         new_user_btn_layout.addWidget(create_btn)
@@ -417,8 +584,6 @@ class UserSelectionScreen(QWidget):
         layout.addWidget(self.new_user_widget)
 
         self.setLayout(layout)
-
-        # Charger les utilisateurs
         self.refresh_user_list()
 
     def refresh_user_list(self):
@@ -452,7 +617,6 @@ class UserSelectionScreen(QWidget):
                 self.refresh_user_list()
                 self.hide_new_user_form()
                 QMessageBox.information(self, "Succès", f"Bienvenue {name} ! 🎉")
-                # Sélectionner automatiquement le nouvel utilisateur
                 items = self.user_list.findItems(name, Qt.MatchFlag.MatchExactly)
                 if items:
                     self.user_list.setCurrentItem(items[0])
@@ -467,8 +631,6 @@ class UserSelectionScreen(QWidget):
         current_item = self.user_list.currentItem()
         if current_item and current_item.flags() != Qt.ItemFlag.NoItemFlags:
             username = current_item.text()
-            QTimer.singleShot(100, lambda: self.voice_engine.speak_async(
-                f"Bonjour {username}! Amusons-nous avec l'alphabet!"))
             self.user_selected.emit(username)
 
 
@@ -503,11 +665,9 @@ class GameScreen(QWidget):
         super().hideEvent(event)
         self.is_active = False
         self.voice_engine.stop()
-        # Forcer la sauvegarde des données
-        self.data_manager.save_data_sync()
+        self.data_manager.save_data()
 
     def setup_ui(self):
-        # Fond opaque
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor(227, 242, 253))
@@ -515,7 +675,6 @@ class GameScreen(QWidget):
 
         layout = QVBoxLayout()
 
-        # En-tête avec nom et score
         header = QHBoxLayout()
 
         self.name_label = QLabel(f"👤 {self.username}")
@@ -530,7 +689,6 @@ class GameScreen(QWidget):
         header.addStretch()
         header.addWidget(self.score_label)
 
-        # Barre de progression
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximum(26)
         self.progress_bar.setStyleSheet("""
@@ -550,18 +708,15 @@ class GameScreen(QWidget):
 
         self.update_score_display()
 
-        # Zone de question
         self.question_label = QLabel("🔊 Écoute bien et choisis la bonne lettre !")
         self.question_label.setFont(QFont('Arial', 24, QFont.Bold))
         self.question_label.setAlignment(Qt.AlignCenter)
         self.question_label.setStyleSheet("color: #FF6B6B; margin: 20px; background-color: transparent;")
 
-        # Bouton écouter
         self.listen_btn = ColorfulButton("🔊 Écouter", "#F7DC6F")
         self.listen_btn.clicked.connect(self.play_letter)
         self.listen_btn.setMaximumWidth(300)
 
-        # Grille de boutons (4 choix)
         self.buttons_widget = QWidget()
         self.buttons_widget.setStyleSheet("background-color: transparent;")
         self.buttons_layout = QGridLayout()
@@ -575,7 +730,6 @@ class GameScreen(QWidget):
 
         self.buttons_widget.setLayout(self.buttons_layout)
 
-        # Bouton menu
         menu_btn = QPushButton("🏠 Menu")
         menu_btn.setFont(QFont('Arial', 14))
         menu_btn.setStyleSheet("""
@@ -607,7 +761,6 @@ class GameScreen(QWidget):
         total = user['total_attempts']
         self.score_label.setText(f"⭐ Score: {correct}/{total}")
 
-        # Mise à jour de la barre de progression
         letters_learned = sum(1 for stats in user['stats'].values()
                               if stats['attempts'] > 0 and stats['correct'] / stats['attempts'] >= 0.7)
         self.progress_bar.setValue(letters_learned)
@@ -621,14 +774,12 @@ class GameScreen(QWidget):
         self.clear_messages()
         self.show_transition()
 
-        # Choisir une lettre (priorité aux difficiles)
         if random.random() < 0.6:
             difficult = self.data_manager.get_difficult_letters(self.username, 10)
             self.current_letter = random.choice(difficult)
         else:
             self.current_letter = random.choice(list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'))
 
-        # Générer 4 choix
         all_letters = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
         all_letters.remove(self.current_letter)
         wrong_choices = random.sample(all_letters, 3)
@@ -636,7 +787,6 @@ class GameScreen(QWidget):
         random.shuffle(self.choices)
         self.correct_answer = self.choices.index(self.current_letter)
 
-        # Mettre à jour les boutons
         for i, btn in enumerate(self.choice_buttons):
             btn.setText(self.choices[i])
             btn.setEnabled(True)
@@ -686,7 +836,6 @@ class GameScreen(QWidget):
             self.voice_engine.speak_async(random.choice(messages))
         else:
             self.animate_failure(choice_idx)
-            self.voice_engine.speak_async(f"Ce n'est pas grave ! C'était la lettre {self.current_letter}")
 
         self.update_score_display()
 
@@ -744,13 +893,13 @@ class GameScreen(QWidget):
         btn = self.choice_buttons[choice_idx]
 
         btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {self.colors[choice_idx]};
-                    color: white;
-                    border: 12px solid #2ECC71;
-                    border-radius: 20px;
-                }}
-            """)
+            QPushButton {{
+                background-color: {self.colors[choice_idx]};
+                color: white;
+                border: 12px solid #2ECC71;
+                border-radius: 20px;
+            }}
+        """)
 
         animation = QPropertyAnimation(btn, b"geometry")
         animation.setDuration(600)
@@ -778,22 +927,22 @@ class GameScreen(QWidget):
         correct_btn = self.choice_buttons[self.correct_answer]
 
         wrong_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {self.colors[choice_idx]};
-                    color: white;
-                    border: 12px solid #E74C3C;
-                    border-radius: 20px;
-                }}
-            """)
+            QPushButton {{
+                background-color: {self.colors[choice_idx]};
+                color: white;
+                border: 12px solid #E74C3C;
+                border-radius: 20px;
+            }}
+        """)
 
         correct_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {self.colors[self.correct_answer]};
-                    color: white;
-                    border: 12px solid #2ECC71;
-                    border-radius: 20px;
-                }}
-            """)
+            QPushButton {{
+                background-color: {self.colors[self.correct_answer]};
+                color: white;
+                border: 12px solid #2ECC71;
+                border-radius: 20px;
+            }}
+        """)
 
         shake_animation = QPropertyAnimation(wrong_btn, b"geometry")
         shake_animation.setDuration(500)
@@ -837,7 +986,7 @@ class GameScreen(QWidget):
         self.flash_background("#F5B7B1")
 
     def show_success_message(self):
-        """Affiche un message de félicitations animé (sans transparence)"""
+        """Affiche un message de félicitations animé"""
         try:
             if self.message_label is not None:
                 self.message_label.deleteLater()
@@ -849,12 +998,12 @@ class GameScreen(QWidget):
         self.message_label = QLabel(random.choice(success_messages), self)
         self.message_label.setFont(QFont('Arial', 40, QFont.Bold))
         self.message_label.setStyleSheet("""
-                color: #2ECC71;
-                background-color: #FFFFFF;
-                border: 6px solid #2ECC71;
-                border-radius: 20px;
-                padding: 15px;
-            """)
+            color: #2ECC71;
+            background-color: #FFFFFF;
+            border: 6px solid #2ECC71;
+            border-radius: 20px;
+            padding: 15px;
+        """)
         self.message_label.setAlignment(Qt.AlignCenter)
         self.message_label.setGeometry(self.width() // 2 - 250, 30, 500, 80)
         self.message_label.show()
@@ -888,7 +1037,7 @@ class GameScreen(QWidget):
         animation_group.start()
 
     def show_correct_letter(self):
-        """Affiche la bonne lettre en grand (sans transparence)"""
+        """Affiche la bonne lettre en grand"""
         try:
             if self.message_label is not None:
                 self.message_label.deleteLater()
@@ -896,14 +1045,14 @@ class GameScreen(QWidget):
             pass
 
         self.message_label = QLabel(f"C'était la lettre\n{self.current_letter}", self)
-        self.message_label.setFont(QFont('Arial', 40, QFont.Bold))
+        self.message_label.setFont(QFont('Arial', 48, QFont.Bold))
         self.message_label.setStyleSheet("""
-                color: #2ECC71;
-                background-color: #FFFFFF;
-                border: 8px solid #2ECC71;
-                border-radius: 25px;
-                padding: 25px;
-            """)
+            color: #2ECC71;
+            background-color: #FFFFFF;
+            border: 8px solid #2ECC71;
+            border-radius: 25px;
+            padding: 25px;
+        """)
         self.message_label.setAlignment(Qt.AlignCenter)
         self.message_label.setGeometry(self.width() // 2 - 250, 30, 500, 180)
         self.message_label.show()
@@ -945,6 +1094,7 @@ class GameScreen(QWidget):
         self.setPalette(flash_palette)
         QTimer.singleShot(300, lambda: self.setPalette(original_palette))
 
+
 class NumbersGameScreen(QWidget):
     """Écran de jeu pour les chiffres"""
     back_to_menu = Signal()
@@ -976,7 +1126,7 @@ class NumbersGameScreen(QWidget):
         super().hideEvent(event)
         self.is_active = False
         self.voice_engine.stop()
-        self.data_manager.save_data_sync()
+        self.data_manager.save_data()
 
     def setup_ui(self):
         self.setAutoFillBackground(True)
@@ -1152,8 +1302,6 @@ class NumbersGameScreen(QWidget):
             self.voice_engine.speak_async(random.choice(messages))
         else:
             self.animate_failure(choice_idx)
-            self.voice_engine.speak_async(
-                f"Ce n'est pas grave ! C'était le chiffre {self.current_number}")
 
         self.update_score_display()
 
@@ -1343,7 +1491,7 @@ class NumbersGameScreen(QWidget):
             pass
 
         self.message_label = QLabel(f"C'était le chiffre\n{self.current_number}", self)
-        self.message_label.setFont(QFont('Arial', 40, QFont.Bold))
+        self.message_label.setFont(QFont('Arial', 48, QFont.Bold))
         self.message_label.setStyleSheet("""
             color: #2ECC71;
             background-color: #FFFFFF;
@@ -1391,6 +1539,7 @@ class NumbersGameScreen(QWidget):
         self.setPalette(flash_palette)
         QTimer.singleShot(300, lambda: self.setPalette(original_palette))
 
+
 class StatsScreen(QWidget):
     """Écran des statistiques"""
     back_to_menu = Signal()
@@ -1427,7 +1576,7 @@ class StatsScreen(QWidget):
         self.difficult_label.setStyleSheet(
             "color: #E74C3C; margin: 20px; background-color: transparent;")
 
-        details_title = QLabel("📝 Détails par lettre :")
+        details_title = QLabel("🔍 Détails par lettre :")
         details_title.setFont(QFont('Arial', 18, QFont.Bold))
         details_title.setAlignment(Qt.AlignCenter)
         details_title.setStyleSheet("color: #2C3E50; margin: 10px; background-color: transparent;")
@@ -1450,7 +1599,7 @@ class StatsScreen(QWidget):
         scroll.setWidget(self.details_widget)
 
         back_btn = ColorfulButton("🏠 Retour au menu", "#45B7D1")
-        back_btn.setMaximumWidth(500)
+        back_btn.setMaximumWidth(650)
         back_btn.clicked.connect(self.back_to_menu.emit)
 
         layout.addWidget(self.title)
@@ -1476,15 +1625,13 @@ class StatsScreen(QWidget):
         letters_learned = sum(1 for stats in user['stats'].values()
                               if stats['attempts'] > 0 and stats['correct'] / stats['attempts'] >= 0.7)
 
-        # Stats chiffres
         total_num = user.get('total_attempts_numbers', 0)
         correct_num = user.get('total_correct_numbers', 0)
         percentage_num = (correct_num / total_num * 100) if total_num > 0 else 0
 
         if 'stats_numbers' in user:
             numbers_learned = sum(1 for stats in user['stats_numbers'].values()
-                                  if
-                                  stats['attempts'] > 0 and stats['correct'] / stats['attempts'] >= 0.7)
+                                  if stats['attempts'] > 0 and stats['correct'] / stats['attempts'] >= 0.7)
         else:
             numbers_learned = 0
 
@@ -1501,7 +1648,7 @@ class StatsScreen(QWidget):
         """)
 
         difficult = self.data_manager.get_difficult_letters(self.username, 5)
-        self.difficult_label.setText("📝 Lettres à réviser: " + ", ".join(difficult))
+        self.difficult_label.setText("🔍 Lettres à réviser: " + ", ".join(difficult))
 
         while self.details_layout.count():
             child = self.details_layout.takeAt(0)
@@ -1541,6 +1688,7 @@ class StatsScreen(QWidget):
                 col = 0
                 row += 1
 
+
 class MenuScreen(QWidget):
     """Écran du menu principal"""
     play_letters_clicked = Signal()
@@ -1579,17 +1727,17 @@ class MenuScreen(QWidget):
         subtitle.setStyleSheet("color: #4ECDC4; margin: 10px; background-color: transparent;")
 
         play_letters_btn = ColorfulButton("🔤 Les Lettres (A-Z)", "#4ECDC4")
-        play_letters_btn.setMaximumWidth(500)
+        play_letters_btn.setMaximumWidth(600)
         play_letters_btn.setMinimumHeight(90)
         play_letters_btn.clicked.connect(self.play_letters_clicked.emit)
 
         play_numbers_btn = ColorfulButton("🔢 Les Chiffres (0-9)", "#E67E22")
-        play_numbers_btn.setMaximumWidth(500)
+        play_numbers_btn.setMaximumWidth(600)
         play_numbers_btn.setMinimumHeight(90)
         play_numbers_btn.clicked.connect(self.play_numbers_clicked.emit)
 
         stats_btn = ColorfulButton("📊 Mes statistiques", "#45B7D1")
-        stats_btn.setMaximumWidth(500)
+        stats_btn.setMaximumWidth(600)
         stats_btn.setMinimumHeight(90)
         stats_btn.clicked.connect(self.stats_clicked.emit)
 
@@ -1631,6 +1779,7 @@ class MenuScreen(QWidget):
 
         self.setLayout(layout)
 
+
 class MainWindow(QMainWindow):
     """Fenêtre principale de l'application"""
 
@@ -1639,8 +1788,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Apprends l'Alphabet !")
         self.setMinimumSize(900, 700)
 
+        # Initialiser l'AudioManager et VoiceEngine
+        self.audio_manager = AudioManager()
+        self.voice_engine = VoiceEngine(self.audio_manager)
         self.data_manager = DataManager()
-        self.voice_engine = VoiceEngine()
         self.username = None
 
         self.setStyleSheet("""
@@ -1652,19 +1803,32 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
+        # Écran d'initialisation
+        self.init_screen = InitializationScreen(self.audio_manager)
+        self.init_screen.initialization_complete.connect(self.show_user_selection)
+        self.stack.addWidget(self.init_screen)
+
+        # Lancer l'initialisation après l'affichage
+        QTimer.singleShot(100, self.init_screen.start_initialization)
+
+    def show_user_selection(self):
+        """Affiche l'écran de sélection d'utilisateur"""
         self.user_selection_screen = UserSelectionScreen(self.data_manager, self.voice_engine)
         self.user_selection_screen.user_selected.connect(self.start_game)
-
         self.stack.addWidget(self.user_selection_screen)
+        self.stack.setCurrentWidget(self.user_selection_screen)
 
     def start_game(self, username):
+        """Démarre le jeu pour l'utilisateur sélectionné"""
         self.username = username
 
-        while self.stack.count() > 1:
-            widget = self.stack.widget(1)
+        # Nettoyer les anciens widgets si nécessaire
+        while self.stack.count() > 2:
+            widget = self.stack.widget(2)
             self.stack.removeWidget(widget)
             widget.deleteLater()
 
+        # Créer les écrans de jeu
         self.menu_screen = MenuScreen(username, self.voice_engine)
         self.menu_screen.play_letters_clicked.connect(self.show_letters_game)
         self.menu_screen.play_numbers_clicked.connect(self.show_numbers_game)
@@ -1689,29 +1853,36 @@ class MainWindow(QMainWindow):
         self.show_menu()
 
     def show_menu(self):
-        self.data_manager.save_data_sync()
+        """Affiche le menu principal"""
+        self.data_manager.save_data()
         self.stack.setCurrentWidget(self.menu_screen)
 
     def show_letters_game(self):
+        """Affiche le jeu des lettres"""
         self.stack.setCurrentWidget(self.letters_game_screen)
 
     def show_numbers_game(self):
+        """Affiche le jeu des chiffres"""
         self.stack.setCurrentWidget(self.numbers_game_screen)
 
     def show_stats(self):
+        """Affiche les statistiques"""
         self.stats_screen.refresh_stats()
         self.stack.setCurrentWidget(self.stats_screen)
 
     def change_user(self):
+        """Retourne à la sélection d'utilisateur"""
         self.data_manager.save_data_sync()
         self.voice_engine.stop()
         self.user_selection_screen.refresh_user_list()
         self.stack.setCurrentWidget(self.user_selection_screen)
 
     def closeEvent(self, event):
+        """Nettoyage lors de la fermeture"""
         self.data_manager.save_data_sync()
         self.voice_engine.shutdown()
         event.accept()
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

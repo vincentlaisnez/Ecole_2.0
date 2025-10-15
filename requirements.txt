@@ -1,14 +1,12 @@
-# Dépendances pour l'application "Apprends l'Alphabet"
+# Requirements pour l'application "Apprends l'Alphabet"
+# Python 3.8+
 
 # Interface graphique Qt6
 PySide6>=6.5.0
 
-# Synthèse vocale locale
-pyttsx3>=2.90
-
-# Dépendances système pour pyttsx3 sur Linux (à installer via apt):
-# sudo apt-get install espeak espeak-data libespeak-dev
-# sudo apt-get install python3-pyqt5.qtmultimedia
-
-# Note: Sur Linux, pour les voix françaises:
-# sudo apt-get install espeak-ng espeak-ng-data
+# Note: Les dépendances système suivantes doivent être installées séparément:
+# - libttspico-utils (Pico TTS - recommandé)
+#   Installation: sudo apt-get install libttspico-utils
+#
+# - espeak (fallback si Pico TTS n'est pas disponible)
+#   Installation: sudo apt-get install espeak
