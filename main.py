@@ -1045,7 +1045,7 @@ class GameScreen(QWidget):
             pass
 
         self.message_label = QLabel(f"C'était la lettre\n{self.current_letter}", self)
-        self.message_label.setFont(QFont('Arial', 48, QFont.Bold))
+        self.message_label.setFont(QFont('Arial', 40, QFont.Bold))
         self.message_label.setStyleSheet("""
             color: #2ECC71;
             background-color: #FFFFFF;
@@ -1177,7 +1177,7 @@ class NumbersGameScreen(QWidget):
 
         self.listen_btn = ColorfulButton("🔊 Écouter", "#F7DC6F")
         self.listen_btn.clicked.connect(self.play_number)
-        self.listen_btn.setMaximumWidth(250)
+        self.listen_btn.setMaximumWidth(300)
 
         self.buttons_widget = QWidget()
         self.buttons_widget.setStyleSheet("background-color: transparent;")
